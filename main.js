@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const { NFC } = require("nfc-pcsc");
+const readNdef = require('./readNdef');
 
 let mainWindow;
 let nfc;
@@ -131,150 +132,10 @@ function initNFC() {
           ndefData = card.data;
         }
 
-        // TAG_ISO_14443_4 또는 ATR이 ISO 14443-4를 나타내는 경우
-        if (
-          !ndefData &&
-          (card.type === "TAG_ISO_14443_4" ||
-            card.standard === "TAG_ISO_14443_4" ||
-            (card.atr && card.atr.toString("hex").includes("80")))
-        ) {
-          console.log("\nISO 14443-4 태그로 처리");
-
-          try {
-            // 방법 1: NDEF 파일 직접 선택 및 읽기
-            console.log("NDEF 파일 선택 시도...");
-
-            // NDEF 파일 선택 (E104)
-            const selectNdef = Buffer.from([
-              0x00, 0xa4, 0x00, 0x0c, 0x02, 0xe1, 0x04,
-            ]);
-            const selectResp = await reader.transmit(selectNdef, 255);
-            console.log("파일 선택 응답:", selectResp.toString("hex"));
-
-            const sw1 = selectResp[selectResp.length - 2];
-            const sw2 = selectResp[selectResp.length - 1];
-
-            if (sw1 === 0x90 && sw2 === 0x00) {
-              console.log("파일 선택 성공, 데이터 읽기...");
-
-              // 먼저 처음 2바이트를 읽어 NDEF 메시지 길이 확인
-              try {
-                const readLength = Buffer.from([0x00, 0xb0, 0x00, 0x00, 0x02]);
-                const lengthResp = await reader.transmit(readLength, 255);
-                console.log("길이 읽기 응답:", lengthResp.toString("hex"));
-
-                if (lengthResp.length >= 4) {
-                  // 길이 파싱
-                  let ndefLength = 0;
-                  if (lengthResp[0] === 0x00) {
-                    ndefLength = (lengthResp[1] << 8) | lengthResp[2];
-                  } else {
-                    ndefLength = lengthResp[0];
-                  }
-                  console.log("NDEF 메시지 길이:", ndefLength);
-
-                  // 실제 길이만큼 읽기 (최대 250바이트)
-                  const readLen = Math.min(ndefLength + 2, 250);
-                  const readData = Buffer.from([
-                    0x00,
-                    0xb0,
-                    0x00,
-                    0x00,
-                    readLen,
-                  ]);
-                  const dataResp = await reader.transmit(readData, 255);
-                  console.log("데이터 읽기 응답:", dataResp.toString("hex"));
-
-                  ndefData = dataResp.slice(0, -2);
-                }
-              } catch (readErr) {
-                console.log(
-                  "단계별 읽기 실패, 전체 읽기 시도:",
-                  readErr.message
-                );
-
-                // 방법 2: 전체 읽기 (더 큰 버퍼)
-                const readAll = Buffer.from([
-                  0x00,
-                  0xb0,
-                  0x00,
-                  0x00,
-                  0xfe, // 254바이트 읽기
-                ]);
-                const dataResp = await reader.transmit(readAll, 255);
-                console.log("전체 읽기 응답:", dataResp.toString("hex"));
-                ndefData = dataResp.slice(0, -2);
-              }
-            } else {
-              console.log(
-                `파일 선택 실패: ${sw1.toString(16).padStart(2, "0")}${sw2
-                  .toString(16)
-                  .padStart(2, "0")}`
-              );
-
-              // 방법 2: CC 파일 먼저 선택
-              console.log("CC 파일 선택 시도...");
-              const selectCC = Buffer.from([
-                0x00, 0xa4, 0x00, 0x0c, 0x02, 0xe1, 0x03,
-              ]);
-              const ccResp = await reader.transmit(selectCC, 255);
-              console.log("CC 선택 응답:", ccResp.toString("hex"));
-
-              // 다시 NDEF 파일 선택 시도
-              const selectResp2 = await reader.transmit(selectNdef, 255);
-              console.log(
-                "NDEF 파일 재선택 응답:",
-                selectResp2.toString("hex")
-              );
-
-              const sw1_2 = selectResp2[selectResp2.length - 2];
-              const sw2_2 = selectResp2[selectResp2.length - 1];
-
-              if (sw1_2 === 0x90 && sw2_2 === 0x00) {
-                console.log("재선택 성공, 데이터 읽기...");
-                const readNdef = Buffer.from([0x00, 0xb0, 0x00, 0x00, 0xfe]);
-                const dataResp = await reader.transmit(readNdef, 255);
-                ndefData = dataResp.slice(0, -2);
-                console.log("재시도 성공:", ndefData.toString("hex"));
-              }
-            }
-          } catch (iso14443Err) {
-            console.log("ISO 14443-4 읽기 실패:", iso14443Err.message);
-          }
-        }
-
-        // TAG_ISO_14443_3 또는 일반 태그
-        if (!ndefData) {
-          console.log("\nISO 14443-3 또는 일반 태그로 처리");
-
-          try {
-            // 블록 읽기 시도
-            console.log("블록 4부터 읽기 시도...");
-            ndefData = await reader.read(4, 64);
-            console.log("읽기 성공:", ndefData.toString("hex"));
-          } catch (readErr) {
-            console.log("블록 읽기 실패:", readErr.message);
-
-            // 블록 0부터 시도
-            try {
-              console.log("블록 0부터 읽기 재시도...");
-              ndefData = await reader.read(0, 64);
-              console.log("읽기 성공:", ndefData.toString("hex"));
-            } catch (read0Err) {
-              console.log("블록 0 읽기도 실패:", read0Err.message);
-            }
-          }
-        }
-
-        // NDEF 파싱
-        if (ndefData && ndefData.length > 0) {
-          console.log("\n=== NDEF 파싱 시작 ===");
-          console.log("데이터 길이:", ndefData.length);
-          console.log("전체 데이터:", ndefData.toString("hex"));
-
-          const url = parseNDEF(ndefData);
-
-          if (url) {
+        const ndefStr = await readNdef( reader );
+				const url = ndefStr ? 'https://' + ndefStr : undefined;
+				
+				if (url) {
             console.log("✅ URL 발견:", url);
 
             // tagId 추출
@@ -348,13 +209,7 @@ function initNFC() {
               text: ndefData.toString("utf8").replace(/[^\x20-\x7E]/g, ""),
             });
           }
-        } else {
-          console.log("❌ 읽을 데이터가 없음");
-          mainWindow.webContents.send("error", {
-            message:
-              "태그에서 데이터를 읽을 수 없습니다. 콘솔 로그를 확인하세요.",
-          });
-        }
+        
       } catch (err) {
         console.error("\n=== 에러 발생 ===");
         console.error("메시지:", err.message);
